@@ -200,6 +200,7 @@
       <table id="logsTable">
         <thead>
           <tr>
+            <th>id</th>
             <th>时间</th>
             <th>模型</th>
             <th>Token信息</th>
@@ -304,6 +305,7 @@
 
       tbody.innerHTML = data.logs.map(log => `
         <tr>
+          <td>${log.id}</td>
           <td>${new Date(log.timestamp).toLocaleString()}</td>
           <td>${log.model}</td>
           <td>

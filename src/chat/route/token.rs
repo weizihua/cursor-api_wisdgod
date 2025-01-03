@@ -5,7 +5,7 @@ use crate::{
             CONTENT_TYPE_TEXT_PLAIN_WITH_UTF8, HEADER_NAME_AUTHORIZATION, HEADER_NAME_CONTENT_TYPE,
             ROUTE_TOKENINFO_PATH,
         },
-        model::{AppConfig, AppState, PageContent, TokenUpdateRequest},
+        model::{AppConfig, PageContent, TokenUpdateRequest},
         lazy::{AUTH_TOKEN, TOKEN_FILE, TOKEN_LIST_FILE},
     },
     common::{
@@ -13,15 +13,22 @@ use crate::{
         utils::{generate_checksum, generate_hash, tokens::load_tokens},
     },
 };
+#[cfg(not(feature = "sqlite"))]
+use crate::app::model::AppState;
+#[cfg(feature = "sqlite")]
+use crate::app::db::APP_DB;
 use axum::{
-    extract::State,
     http::HeaderMap,
     response::{IntoResponse, Response},
     Json,
 };
+#[cfg(not(feature = "sqlite"))]
+use axum::extract::State;
 use reqwest::StatusCode;
 use serde::Serialize;
+#[cfg(not(feature = "sqlite"))]
 use std::sync::Arc;
+#[cfg(not(feature = "sqlite"))]
 use tokio::sync::Mutex;
 
 #[derive(Serialize)]
@@ -36,15 +43,26 @@ pub async fn handle_get_checksum() -> Json<ChecksumResponse> {
 
 // 更新 TokenInfo 处理
 pub async fn handle_update_tokeninfo(
-    State(state): State<Arc<Mutex<AppState>>>,
+    #[cfg(not(feature = "sqlite"))] State(state): State<Arc<Mutex<AppState>>>,
 ) -> Json<NormalResponseNoData> {
     // 重新加载 tokens
     let token_infos = load_tokens();
 
     // 更新应用状态
+    #[cfg(not(feature = "sqlite"))]
     {
         let mut state = state.lock().await;
         state.token_infos = token_infos;
+    }
+
+    #[cfg(feature = "sqlite")]
+    {
+        // 使用 APP_DB 更新 token_infos
+        if let Ok(db) = APP_DB.lock() {
+            for token_info in token_infos {
+                let _ = db.update_token_info(&token_info);
+            }
+        }
     }
 
     Json(NormalResponseNoData {
@@ -55,13 +73,8 @@ pub async fn handle_update_tokeninfo(
 
 // 获取 TokenInfo 处理
 pub async fn handle_get_tokeninfo(
-    State(_state): State<Arc<Mutex<AppState>>>,
     headers: HeaderMap,
 ) -> Result<Json<TokenInfoResponse>, StatusCode> {
-    let auth_token = AUTH_TOKEN.as_str();
-    let token_file = TOKEN_FILE.as_str();
-    let token_list_file = TOKEN_LIST_FILE.as_str();
-
     // 验证 AUTH_TOKEN
     let auth_header = headers
         .get(HEADER_NAME_AUTHORIZATION)
@@ -69,20 +82,37 @@ pub async fn handle_get_tokeninfo(
         .and_then(|h| h.strip_prefix(AUTHORIZATION_BEARER_PREFIX))
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    if auth_header != auth_token {
+    if auth_header != AUTH_TOKEN.as_str() {
         return Err(StatusCode::UNAUTHORIZED);
     }
+
+    let token_file = TOKEN_FILE.as_str();
+    let token_list_file = TOKEN_LIST_FILE.as_str();
 
     // 读取文件内容
     let tokens = std::fs::read_to_string(&token_file).unwrap_or_else(|_| String::new());
     let token_list = std::fs::read_to_string(&token_list_file).unwrap_or_else(|_| String::new());
 
+    // 获取 tokens_count
+    let tokens_count = {
+        #[cfg(feature = "sqlite")]
+        {
+            APP_DB.lock()
+                .map(|db| db.get_token_infos().map(|v| v.len()).unwrap_or(0))
+                .unwrap_or(0)
+        }
+        #[cfg(not(feature = "sqlite"))]
+        {
+            tokens.len()
+        }
+    };
+
     Ok(Json(TokenInfoResponse {
         status: ApiStatus::Success,
         token_file: token_file.to_string(),
         token_list_file: token_list_file.to_string(),
-        tokens: Some(tokens.clone()),
-        tokens_count: Some(tokens.len()),
+        tokens: Some(tokens),
+        tokens_count: Some(tokens_count),
         token_list: Some(token_list),
         message: None,
     }))
@@ -104,14 +134,10 @@ pub struct TokenInfoResponse {
 }
 
 pub async fn handle_update_tokeninfo_post(
-    State(state): State<Arc<Mutex<AppState>>>,
+    #[cfg(not(feature = "sqlite"))] State(state): State<Arc<Mutex<AppState>>>,
     headers: HeaderMap,
     Json(request): Json<TokenUpdateRequest>,
 ) -> Result<Json<TokenInfoResponse>, StatusCode> {
-    let auth_token = AUTH_TOKEN.as_str();
-    let token_file = TOKEN_FILE.as_str();
-    let token_list_file = TOKEN_LIST_FILE.as_str();
-
     // 验证 AUTH_TOKEN
     let auth_header = headers
         .get(HEADER_NAME_AUTHORIZATION)
@@ -119,15 +145,18 @@ pub async fn handle_update_tokeninfo_post(
         .and_then(|h| h.strip_prefix(AUTHORIZATION_BEARER_PREFIX))
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    if auth_header != auth_token {
+    if auth_header != AUTH_TOKEN.as_str() {
         return Err(StatusCode::UNAUTHORIZED);
     }
 
-    // 写入 .token 文件
-    std::fs::write(&token_file, &request.tokens).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let token_file = TOKEN_FILE.as_str();
+    let token_list_file = TOKEN_LIST_FILE.as_str();
 
-    // 如果提供了 token_list，则写入
-    if let Some(token_list) = request.token_list {
+    // 写入文件
+    std::fs::write(&token_file, &request.tokens)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some(token_list) = &request.token_list {
         std::fs::write(&token_list_file, token_list)
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
@@ -137,9 +166,19 @@ pub async fn handle_update_tokeninfo_post(
     let token_infos_len = token_infos.len();
 
     // 更新应用状态
+    #[cfg(not(feature = "sqlite"))]
     {
         let mut state = state.lock().await;
         state.token_infos = token_infos;
+    }
+
+    #[cfg(feature = "sqlite")]
+    {
+        if let Ok(db) = APP_DB.lock() {
+            for token_info in token_infos {
+                let _ = db.update_token_info(&token_info);
+            }
+        }
     }
 
     Ok(Json(TokenInfoResponse {

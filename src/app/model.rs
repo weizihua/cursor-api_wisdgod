@@ -87,7 +87,9 @@ pub struct Pages {
 pub struct AppState {
     pub total_requests: u64,
     pub active_requests: u64,
+    #[cfg(not(feature = "sqlite"))]
     pub request_logs: Vec<RequestLog>,
+    #[cfg(not(feature = "sqlite"))]
     pub token_infos: Vec<TokenInfo>,
 }
 
@@ -273,6 +275,7 @@ impl AppConfig {
 }
 
 impl AppState {
+    #[cfg(not(feature = "sqlite"))]
     pub fn new(token_infos: Vec<TokenInfo>) -> Self {
         Self {
             total_requests: 0,
@@ -281,11 +284,20 @@ impl AppState {
             token_infos,
         }
     }
+
+    #[cfg(feature = "sqlite")]
+    pub fn new() -> Self {
+        Self {
+            total_requests: 0,
+            active_requests: 0,
+        }
+    }
 }
 
 // 请求日志
 #[derive(Serialize, Clone)]
 pub struct RequestLog {
+    pub id: u64,
     pub timestamp: chrono::DateTime<chrono::Local>,
     pub model: String,
     pub token_info: TokenInfo,

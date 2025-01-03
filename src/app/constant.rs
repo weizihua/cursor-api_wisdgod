@@ -50,9 +50,6 @@ def_pub_const!(AUTHORIZATION_BEARER_PREFIX, "Bearer ");
 def_pub_const!(OBJECT_CHAT_COMPLETION, "chat.completion");
 def_pub_const!(OBJECT_CHAT_COMPLETION_CHUNK, "chat.completion.chunk");
 
-def_pub_const!(CURSOR_API2_HOST, "api2.cursor.sh");
-def_pub_const!(CURSOR_API2_BASE_URL, "https://api2.cursor.sh/aiserver.v1.AiService/");
-
 def_pub_const!(CURSOR_API2_STREAM_CHAT, "StreamChat");
 def_pub_const!(CURSOR_API2_GET_USER_INFO, "GetUserInfo");
 

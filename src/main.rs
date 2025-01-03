@@ -63,6 +63,9 @@ async fn main() {
     let token_infos = load_tokens();
 
     // 初始化应用状态
+    #[cfg(feature = "sqlite")]
+    let state = Arc::new(Mutex::new(AppState::new()));
+    #[cfg(not(feature = "sqlite"))]
     let state = Arc::new(Mutex::new(AppState::new(token_infos)));
 
     // 设置路由

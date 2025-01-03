@@ -7,6 +7,7 @@ macro_rules! def_pub_const {
 }
 def_pub_const!(ERR_UNSUPPORTED_GIF, "不支持动态 GIF");
 def_pub_const!(ERR_UNSUPPORTED_IMAGE_FORMAT, "不支持的图片格式，仅支持 PNG、JPEG、WEBP 和非动态 GIF");
+def_pub_const!(ERR_NODATA, "No data");
 
 const MODEL_OBJECT: &str = "model";
 const CREATED: &i64 = &1706659200;

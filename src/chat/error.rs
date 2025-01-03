@@ -2,41 +2,66 @@ use super::aiserver::v1::throw_error_check_request::Error as ErrorType;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 pub struct ChatError {
-    pub error: ErrorBody,
+    error: ErrorBody,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 pub struct ErrorBody {
-    pub code: String,
-    pub message: String,
-    pub details: Vec<ErrorDetail>,
+    code: String,
+    // message: String, always: Error
+    details: Vec<ErrorDetail>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 pub struct ErrorDetail {
-    #[serde(rename = "type")]
-    pub error_type: String,
-    pub debug: ErrorDebug,
-    pub value: String,
+    // #[serde(rename = "type")]
+    // error_type: String, always: aiserver.v1.ErrorDetails
+    debug: ErrorDebug,
+    value: String,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 pub struct ErrorDebug {
-    pub error: String,
-    pub details: ErrorDetails,
-    #[serde(rename = "isExpected")]
-    pub is_expected: bool,
+    error: String,
+    details: ErrorDetails,
+    // #[serde(rename = "isExpected")]
+    // is_expected: Option<bool>,
 }
 
-impl ErrorDebug {
-    // pub fn is_valid(&self) -> bool {
-    //     ErrorType::from_str_name(&self.error).is_some()
-    // }
+#[derive(Deserialize)]
+pub struct ErrorDetails {
+    title: String,
+    detail: String,
+    // #[serde(rename = "isRetryable")]
+    // is_retryable: Option<bool>,
+}
+
+use crate::common::models::{ApiStatus, ErrorResponse as CommonErrorResponse};
+
+impl ChatError {
+    pub fn to_error_response(&self) -> ErrorResponse {
+        if self.error.details.is_empty() {
+            return ErrorResponse {
+                status: 500,
+                code: "unknown".to_string(),
+                error: None,
+            };
+        }
+        ErrorResponse {
+            status: self.status_code(),
+            code: self.error.code.clone(),
+            error: Some(Error {
+                message: self.error.details[0].debug.details.title.clone(),
+                details: self.error.details[0].debug.details.detail.clone(),
+                value: self.error.details[0].value.clone(),
+            }),
+        }
+    }
 
     pub fn status_code(&self) -> u16 {
-        match ErrorType::from_str_name(&self.error) {
+        match ErrorType::from_str_name(&self.error.details[0].debug.error) {
             Some(error) => match error {
                 ErrorType::Unspecified => 500,
                 ErrorType::BadApiKey
@@ -68,46 +93,26 @@ impl ErrorDebug {
                 | ErrorType::SlashEditFileTooLong
                 | ErrorType::FileUnsupported
                 | ErrorType::ClaudeImageTooLarge => 400,
-                _ => 500,
+                ErrorType::Deprecated
+                | ErrorType::FreeUserUsageLimit
+                | ErrorType::ProUserUsageLimit
+                | ErrorType::ResourceExhausted
+                | ErrorType::Openai
+                | ErrorType::MaxTokens
+                | ErrorType::ApiKeyNotSupported
+                | ErrorType::UserAbortedRequest
+                | ErrorType::CustomMessage
+                | ErrorType::OutdatedClient
+                | ErrorType::Debounced
+                | ErrorType::RepositoryServiceRepositoryIsNotInitialized => 500,
             },
             None => 500,
         }
     }
-}
 
-#[derive(Serialize, Deserialize)]
-pub struct ErrorDetails {
-    pub title: String,
-    pub detail: String,
-    #[serde(rename = "isRetryable")]
-    pub is_retryable: bool,
-}
-
-use crate::common::models::{ApiStatus, ErrorResponse as CommonErrorResponse};
-
-impl ChatError {
-    pub fn to_json(&self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap()
-    }
-
-    pub fn to_error_response(&self) -> ErrorResponse {
-        if self.error.details.is_empty() {
-            return ErrorResponse {
-                status: 500,
-                code: "ERROR_UNKNOWN".to_string(),
-                error: None,
-            };
-        }
-        ErrorResponse {
-            status: self.error.details[0].debug.status_code(),
-            code: self.error.details[0].debug.error.clone(),
-            error: Some(Error {
-                message: self.error.details[0].debug.details.title.clone(),
-                details: self.error.details[0].debug.details.detail.clone(),
-                value: self.error.details[0].value.clone(),
-            }),
-        }
-    }
+    // pub fn is_expected(&self) -> bool {
+    //     self.error.details[0].debug.is_expected.unwrap_or_default()
+    // }
 }
 
 #[derive(Serialize)]
@@ -135,7 +140,7 @@ impl ErrorResponse {
     }
 
     pub fn native_code(&self) -> String {
-        self.code.replace("_", " ").to_lowercase()
+        self.code.replace("_", " ")
     }
 
     pub fn to_common(self) -> CommonErrorResponse {
@@ -157,7 +162,7 @@ pub enum StreamError {
 impl std::fmt::Display for StreamError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            StreamError::ChatError(error) => write!(f, "{}", serde_json::to_string(error).unwrap()),
+            StreamError::ChatError(error) => write!(f, "{}", error.error.details[0].debug.details.title),
             StreamError::DataLengthLessThan5 => write!(f, "data length less than 5"),
             StreamError::EmptyMessage => write!(f, "empty message"),
         }

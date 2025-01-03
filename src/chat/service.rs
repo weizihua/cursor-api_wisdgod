@@ -147,7 +147,9 @@ pub async fn handle_chat(
             }
         }
 
+        let next_id = state.request_logs.last().map_or(1, |log| log.id + 1);
         state.request_logs.push(RequestLog {
+            id: next_id,
             timestamp: request_time,
             model: request.model.clone(),
             token_info: TokenInfo {
@@ -420,11 +422,6 @@ pub async fn handle_chat(
                             }
                             Ok(Bytes::new())
                         }
-                        Err(StreamError::ChatError(error)) => {
-                            buffer_guard.clear();
-                            eprintln!("Stream error occurred: {}", error.to_json());
-                            Ok(Bytes::new())
-                        }
                         Err(e) => {
                             buffer_guard.clear();
                             eprintln!("[警告] Stream error: {}", e);
@@ -480,7 +477,7 @@ pub async fn handle_chat(
                 }
                 Err(StreamError::ChatError(error)) => {
                     return Err((
-                        StatusCode::from_u16(error.error.details[0].debug.status_code())
+                        StatusCode::from_u16(error.status_code())
                             .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                         Json(error.to_error_response().to_common()),
                     ));

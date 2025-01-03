@@ -33,11 +33,11 @@ def_pub_static!(TOKEN_FILE, env: "TOKEN_FILE", default: DEFAULT_TOKEN_FILE_NAME)
 def_pub_static!(TOKEN_LIST_FILE, env: "TOKEN_LIST_FILE", default: DEFAULT_TOKEN_LIST_FILE_NAME);
 def_pub_static!(
     ROUTE_MODELS_PATH,
-    format!("{}/v1/models", ROUTE_PREFIX.as_str())
+    format!("{}/v1/models", *ROUTE_PREFIX)
 );
 def_pub_static!(
     ROUTE_CHAT_PATH,
-    format!("{}/v1/chat/completions", ROUTE_PREFIX.as_str())
+    format!("{}/v1/chat/completions", *ROUTE_PREFIX)
 );
 
 pub static START_TIME: LazyLock<chrono::DateTime<chrono::Local>> =
@@ -48,6 +48,12 @@ pub fn get_start_time() -> chrono::DateTime<chrono::Local> {
 }
 
 def_pub_static!(DEFAULT_INSTRUCTIONS, env: "DEFAULT_INSTRUCTIONS", default: "Respond in Chinese by default");
+
+def_pub_static!(CURSOR_API2_HOST, env: "REVERSE_PROXY_HOST", default: "api2.cursor.sh");
+
+pub static CURSOR_API2_BASE_URL: LazyLock<String> = LazyLock::new(|| {
+    format!("https://{}/aiserver.v1.AiService/", *CURSOR_API2_HOST)
+});
 
 // pub static DEBUG: LazyLock<bool> = LazyLock::new(|| parse_bool_from_env("DEBUG", false));
 

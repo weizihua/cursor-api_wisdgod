@@ -1,5 +1,6 @@
 use crate::{
     app::model::AppState,
+    chat::constant::ERR_NODATA,
     common::{models::usage::GetUserInfo, utils::get_user_usage},
 };
 use axum::{
@@ -26,11 +27,11 @@ pub async fn get_user_info(
 
     let (auth_token, checksum) = match token_info {
         Some(token_info) => (token_info.token.clone(), token_info.checksum.clone()),
-        None => return Json(GetUserInfo::Error("No data".to_string())),
+        None => return Json(GetUserInfo::Error(ERR_NODATA.to_string())),
     };
 
     match get_user_usage(&auth_token, &checksum).await {
         Some(usage) => Json(GetUserInfo::Usage(usage)),
-        None => Json(GetUserInfo::Error("No data".to_string())),
+        None => Json(GetUserInfo::Error(ERR_NODATA.to_string())),
     }
 }

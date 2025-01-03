@@ -1,6 +1,7 @@
 mod checksum;
 pub use checksum::*;
 pub mod tokens;
+pub mod oauth;
 use prost::Message as _;
 
 use crate::{app::constant::CURSOR_API2_GET_USER_INFO, chat::aiserver::v1::GetUserInfoResponse};

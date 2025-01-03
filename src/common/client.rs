@@ -1,7 +1,10 @@
-use crate::app::constant::{
-    AUTHORIZATION_BEARER_PREFIX, CONTENT_TYPE_CONNECT_PROTO, CONTENT_TYPE_PROTO,
-    CURSOR_API2_BASE_URL, CURSOR_API2_HOST, CURSOR_API2_STREAM_CHAT, HEADER_NAME_AUTHORIZATION,
-    HEADER_NAME_CONTENT_TYPE,
+use crate::app::{
+    constant::{
+        AUTHORIZATION_BEARER_PREFIX, CONTENT_TYPE_CONNECT_PROTO, CONTENT_TYPE_PROTO,
+        CURSOR_API2_STREAM_CHAT, HEADER_NAME_AUTHORIZATION,
+        HEADER_NAME_CONTENT_TYPE,
+    },
+    lazy::{CURSOR_API2_HOST, CURSOR_API2_BASE_URL},
 };
 use reqwest::Client;
 use uuid::Uuid;
@@ -17,7 +20,7 @@ pub fn build_client(auth_token: &str, checksum: &str, endpoint: &str) -> reqwest
     };
 
     client
-        .post(format!("{}{}", CURSOR_API2_BASE_URL, endpoint))
+        .post(format!("{}{}", *CURSOR_API2_BASE_URL, endpoint))
         .header(HEADER_NAME_CONTENT_TYPE, content_type)
         .header(
             HEADER_NAME_AUTHORIZATION,
@@ -32,5 +35,5 @@ pub fn build_client(auth_token: &str, checksum: &str, endpoint: &str) -> reqwest
         .header("x-cursor-timezone", "Asia/Shanghai")
         .header("x-ghost-mode", "false")
         .header("x-request-id", trace_id)
-        .header("Host", CURSOR_API2_HOST)
+        .header("Host", CURSOR_API2_HOST.clone())
 }
