@@ -3,15 +3,16 @@ mod chat;
 mod common;
 
 use app::{
-    config::handle_config_update,
-    constant::{
-        EMPTY_STRING, PKG_VERSION, ROUTE_ABOUT_PATH, ROUTE_CONFIG_PATH, ROUTE_ENV_EXAMPLE_PATH,
-        ROUTE_GET_CHECKSUM, ROUTE_GET_TOKENINFO_PATH, ROUTE_GET_USER_INFO_PATH, ROUTE_HEALTH_PATH,
-        ROUTE_LOGS_PATH, ROUTE_README_PATH, ROUTE_ROOT_PATH, ROUTE_STATIC_PATH,
-        ROUTE_TOKENINFO_PATH, ROUTE_UPDATE_TOKENINFO_PATH,
-    },
-    model::*,
-    lazy::{AUTH_TOKEN, ROUTE_CHAT_PATH, ROUTE_MODELS_PATH},
+    config::handle_config_update, constant::{
+        EMPTY_STRING, PKG_NAME, PKG_VERSION, ROUTE_ABOUT_PATH, ROUTE_API_PATH,
+        ROUTE_AUTH_CALLBACK_PATH, ROUTE_AUTH_INITIATE_PATH, ROUTE_AUTH_PATH, ROUTE_CHAT_PATH,
+        ROUTE_CONFIG_PATH, ROUTE_ENV_EXAMPLE_PATH, ROUTE_GET_CHECKSUM, ROUTE_GET_TOKENINFO_PATH,
+        ROUTE_GET_USER_INFO_PATH, ROUTE_HEALTH_PATH, ROUTE_LOGS_PATH, ROUTE_MODELS_PATH,
+        ROUTE_README_PATH, ROUTE_ROOT_PATH, ROUTE_STATIC_PATH, ROUTE_TOKENINFO_PATH,
+        ROUTE_UPDATE_TOKENINFO_PATH,
+    }, db::init_database, lazy::{
+        OAUTH_CLIENT_ID, OAUTH_CLIENT_SECRET, OAUTH_REDIRECT_URI, PUBLIC_AUTH_TOKEN, ROUTE_PREFIX,
+    }, model::{AppConfig, AppState, VisionAbility}
 };
 use axum::{
     routing::{get, post},
@@ -19,14 +20,14 @@ use axum::{
 };
 use chat::{
     route::{
-        get_user_info, handle_about, handle_config_page, handle_env_example, handle_get_checksum,
-        handle_get_tokeninfo, handle_health, handle_logs, handle_logs_post, handle_readme,
-        handle_root, handle_static, handle_tokeninfo_page, handle_update_tokeninfo,
-        handle_update_tokeninfo_post,
+        get_user_info, handle_about, handle_auth_callback, handle_auth_initiate,
+        handle_config_page, handle_env_example, handle_get_checksum, handle_get_tokeninfo,
+        handle_health, handle_logs, handle_logs_post, handle_readme, handle_root, handle_static,
+        handle_tokeninfo_page, handle_update_tokeninfo_post,
     },
     service::{handle_chat, handle_models},
 };
-use common::utils::{parse_bool_from_env, parse_string_from_env, tokens::load_tokens};
+use common::utils::{parse_bool_from_env, parse_string_from_env};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::cors::CorsLayer;
@@ -46,8 +47,20 @@ async fn main() {
     // 加载环境变量
     dotenvy::dotenv().ok();
 
-    if AUTH_TOKEN.is_empty() {
-        panic!("AUTH_TOKEN must be set")
+    if PUBLIC_AUTH_TOKEN.is_empty() {
+        panic!("PUBLIC_AUTH_TOKEN must be set")
+    };
+
+    if OAUTH_CLIENT_ID.is_empty() {
+        panic!("OAUTH_CLIENT_ID must be set")
+    };
+
+    if OAUTH_CLIENT_SECRET.is_empty() {
+        panic!("OAUTH_CLIENT_SECRET must be set")
+    };
+
+    if OAUTH_REDIRECT_URI.is_empty() {
+        panic!("OAUTH_REDIRECT_URI must be set")
     };
 
     // 初始化全局配置
@@ -59,30 +72,29 @@ async fn main() {
         parse_bool_from_env("PASS_ANY_CLAUDE", false),
     );
 
-    // 加载 tokens
-    let token_infos = load_tokens();
-
     // 初始化应用状态
-    #[cfg(feature = "sqlite")]
     let state = Arc::new(Mutex::new(AppState::new()));
-    #[cfg(not(feature = "sqlite"))]
-    let state = Arc::new(Mutex::new(AppState::new(token_infos)));
+
+    init_database(format!("{}.db", PKG_NAME).as_str()).await.unwrap();
 
     // 设置路由
     let app = Router::new()
+        .nest(
+            ROUTE_PREFIX.as_str(),
+            Router::new()
+                .route(ROUTE_MODELS_PATH, get(handle_models))
+                .route(ROUTE_CHAT_PATH, post(handle_chat)),
+        )
         .route(ROUTE_ROOT_PATH, get(handle_root))
         .route(ROUTE_HEALTH_PATH, get(handle_health))
         .route(ROUTE_TOKENINFO_PATH, get(handle_tokeninfo_page))
-        .route(ROUTE_MODELS_PATH.as_str(), get(handle_models))
         .route(ROUTE_GET_CHECKSUM, get(handle_get_checksum))
         .route(ROUTE_GET_USER_INFO_PATH, get(get_user_info))
-        .route(ROUTE_UPDATE_TOKENINFO_PATH, get(handle_update_tokeninfo))
         .route(ROUTE_GET_TOKENINFO_PATH, post(handle_get_tokeninfo))
         .route(
             ROUTE_UPDATE_TOKENINFO_PATH,
             post(handle_update_tokeninfo_post),
         )
-        .route(ROUTE_CHAT_PATH.as_str(), post(handle_chat))
         .route(ROUTE_LOGS_PATH, get(handle_logs))
         .route(ROUTE_LOGS_PATH, post(handle_logs_post))
         .route(ROUTE_ENV_EXAMPLE_PATH, get(handle_env_example))
@@ -91,6 +103,15 @@ async fn main() {
         .route(ROUTE_STATIC_PATH, get(handle_static))
         .route(ROUTE_ABOUT_PATH, get(handle_about))
         .route(ROUTE_README_PATH, get(handle_readme))
+        .nest(
+            ROUTE_API_PATH,
+            Router::new().nest(
+                ROUTE_AUTH_PATH,
+                Router::new()
+                    .route(ROUTE_AUTH_CALLBACK_PATH, get(handle_auth_callback))
+                    .route(ROUTE_AUTH_INITIATE_PATH, get(handle_auth_initiate)),
+            ),
+        )
         .layer(CorsLayer::permissive())
         .with_state(state);
 

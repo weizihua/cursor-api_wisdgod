@@ -1,15 +1,10 @@
-use crate::{
-    app::constant::{
-        ERR_INVALID_PATH, ERR_RESET_CONFIG, ERR_UPDATE_CONFIG, ROUTE_ABOUT_PATH, ROUTE_CONFIG_PATH,
-        ROUTE_LOGS_PATH, ROUTE_README_PATH, ROUTE_ROOT_PATH, ROUTE_SHARED_JS_PATH,
-        ROUTE_SHARED_STYLES_PATH, ROUTE_TOKENINFO_PATH,
-    },
-    common::models::usage::UserUsageInfo,
+use crate::app::constant::{
+    ERR_INVALID_PATH, ERR_RESET_CONFIG, ERR_UPDATE_CONFIG, ROUTE_ABOUT_PATH, ROUTE_CONFIG_PATH,
+    ROUTE_LOGS_PATH, ROUTE_README_PATH, ROUTE_ROOT_PATH, ROUTE_SHARED_JS_PATH,
+    ROUTE_SHARED_STYLES_PATH, ROUTE_TOKENINFO_PATH,
 };
-use crate::chat::model::Message;
-use lazy_static::lazy_static;
 use serde::{Deserialize, Serialize};
-use std::sync::RwLock;
+use std::sync::{LazyLock, RwLock};
 
 // 页面内容类型枚举
 #[derive(Clone, Serialize, Deserialize)]
@@ -87,16 +82,10 @@ pub struct Pages {
 pub struct AppState {
     pub total_requests: u64,
     pub active_requests: u64,
-    #[cfg(not(feature = "sqlite"))]
-    pub request_logs: Vec<RequestLog>,
-    #[cfg(not(feature = "sqlite"))]
-    pub token_infos: Vec<TokenInfo>,
 }
 
 // 全局配置实例
-lazy_static! {
-    pub static ref APP_CONFIG: RwLock<AppConfig> = RwLock::new(AppConfig::default());
-}
+pub static APP_CONFIG: LazyLock<RwLock<AppConfig>> = LazyLock::new(|| RwLock::new(AppConfig::default()));
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -275,17 +264,6 @@ impl AppConfig {
 }
 
 impl AppState {
-    #[cfg(not(feature = "sqlite"))]
-    pub fn new(token_infos: Vec<TokenInfo>) -> Self {
-        Self {
-            total_requests: 0,
-            active_requests: 0,
-            request_logs: Vec::new(),
-            token_infos,
-        }
-    }
-
-    #[cfg(feature = "sqlite")]
     pub fn new() -> Self {
         Self {
             total_requests: 0,
@@ -294,51 +272,5 @@ impl AppState {
     }
 }
 
-// 请求日志
-#[derive(Serialize, Clone)]
-pub struct RequestLog {
-    pub id: u64,
-    pub timestamp: chrono::DateTime<chrono::Local>,
-    pub model: String,
-    pub token_info: TokenInfo,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub prompt: Option<String>,
-    pub stream: bool,
-    pub status: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-// pub struct PromptList(Option<String>);
-
-// impl PromptList {
-//     pub fn to_vec(&self) -> Vec<>
-// }
-
-// 聊天请求
-#[derive(Deserialize)]
-pub struct ChatRequest {
-    pub model: String,
-    pub messages: Vec<Message>,
-    #[serde(default)]
-    pub stream: bool,
-}
-
-// 用于存储 token 信息
-#[derive(Serialize, Clone)]
-pub struct TokenInfo {
-    pub token: String,
-    pub checksum: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alias: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub usage: Option<UserUsageInfo>,
-}
-
-// TokenUpdateRequest 结构体
-#[derive(Deserialize)]
-pub struct TokenUpdateRequest {
-    pub tokens: String,
-    #[serde(default)]
-    pub token_list: Option<String>,
-}
+mod db;
+pub use db::*;

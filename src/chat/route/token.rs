@@ -2,34 +2,30 @@ use crate::{
     app::{
         constant::{
             AUTHORIZATION_BEARER_PREFIX, CONTENT_TYPE_TEXT_HTML_WITH_UTF8,
-            CONTENT_TYPE_TEXT_PLAIN_WITH_UTF8, HEADER_NAME_AUTHORIZATION, HEADER_NAME_CONTENT_TYPE,
-            ROUTE_TOKENINFO_PATH,
+            CONTENT_TYPE_TEXT_PLAIN_WITH_UTF8, ROUTE_TOKENINFO_PATH,
         },
-        model::{AppConfig, PageContent, TokenUpdateRequest},
-        lazy::{AUTH_TOKEN, TOKEN_FILE, TOKEN_LIST_FILE},
+        db::{
+            get_token_by_id, get_token_by_token, get_tokens_by_user_id, get_user_by_auth_token,
+            insert_token, update_token,
+        },
+        model::{AppConfig, PageContent, TokenInfo, TokenStatus, TokenUpdateRequest},
     },
     common::{
-        models::{ApiStatus, NormalResponseNoData},
-        utils::{generate_checksum, generate_hash, tokens::load_tokens},
+        models::ApiStatus,
+        utils::{extract_user_id, extract_time, generate_checksum, generate_hash, validate_checksum},
     },
 };
-#[cfg(not(feature = "sqlite"))]
-use crate::app::model::AppState;
-#[cfg(feature = "sqlite")]
-use crate::app::db::APP_DB;
 use axum::{
-    http::HeaderMap,
+    http::{
+        header::{AUTHORIZATION, CONTENT_TYPE},
+        HeaderMap,
+    },
     response::{IntoResponse, Response},
     Json,
 };
-#[cfg(not(feature = "sqlite"))]
-use axum::extract::State;
+use chrono::Local;
 use reqwest::StatusCode;
 use serde::Serialize;
-#[cfg(not(feature = "sqlite"))]
-use std::sync::Arc;
-#[cfg(not(feature = "sqlite"))]
-use tokio::sync::Mutex;
 
 #[derive(Serialize)]
 pub struct ChecksumResponse {
@@ -41,79 +37,38 @@ pub async fn handle_get_checksum() -> Json<ChecksumResponse> {
     Json(ChecksumResponse { checksum })
 }
 
-// 更新 TokenInfo 处理
-pub async fn handle_update_tokeninfo(
-    #[cfg(not(feature = "sqlite"))] State(state): State<Arc<Mutex<AppState>>>,
-) -> Json<NormalResponseNoData> {
-    // 重新加载 tokens
-    let token_infos = load_tokens();
-
-    // 更新应用状态
-    #[cfg(not(feature = "sqlite"))]
-    {
-        let mut state = state.lock().await;
-        state.token_infos = token_infos;
-    }
-
-    #[cfg(feature = "sqlite")]
-    {
-        // 使用 APP_DB 更新 token_infos
-        if let Ok(db) = APP_DB.lock() {
-            for token_info in token_infos {
-                let _ = db.update_token_info(&token_info);
-            }
-        }
-    }
-
-    Json(NormalResponseNoData {
-        status: ApiStatus::Success,
-        message: Some("Token list has been reloaded".to_string()),
-    })
-}
-
 // 获取 TokenInfo 处理
 pub async fn handle_get_tokeninfo(
     headers: HeaderMap,
 ) -> Result<Json<TokenInfoResponse>, StatusCode> {
-    // 验证 AUTH_TOKEN
+    // 验证用户身份
     let auth_header = headers
-        .get(HEADER_NAME_AUTHORIZATION)
+        .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix(AUTHORIZATION_BEARER_PREFIX))
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    if auth_header != AUTH_TOKEN.as_str() {
-        return Err(StatusCode::UNAUTHORIZED);
+    // 获取用户信息
+    let user = get_user_by_auth_token(auth_header)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    // 获取用户的tokens
+    let tokens = if user.id == 0 {
+        // 管理员可以查看所有tokens
+        get_tokens_by_user_id(None)
+    } else {
+        // 普通用户只能查看自己的tokens
+        get_tokens_by_user_id(Some(user.id))
     }
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let token_file = TOKEN_FILE.as_str();
-    let token_list_file = TOKEN_LIST_FILE.as_str();
-
-    // 读取文件内容
-    let tokens = std::fs::read_to_string(&token_file).unwrap_or_else(|_| String::new());
-    let token_list = std::fs::read_to_string(&token_list_file).unwrap_or_else(|_| String::new());
-
-    // 获取 tokens_count
-    let tokens_count = {
-        #[cfg(feature = "sqlite")]
-        {
-            APP_DB.lock()
-                .map(|db| db.get_token_infos().map(|v| v.len()).unwrap_or(0))
-                .unwrap_or(0)
-        }
-        #[cfg(not(feature = "sqlite"))]
-        {
-            tokens.len()
-        }
-    };
+    let token_num = tokens.len();
 
     Ok(Json(TokenInfoResponse {
         status: ApiStatus::Success,
-        token_file: token_file.to_string(),
-        token_list_file: token_list_file.to_string(),
         tokens: Some(tokens),
-        tokens_count: Some(tokens_count),
-        token_list: Some(token_list),
+        num: Some(token_num),
         message: None,
     }))
 }
@@ -121,89 +76,113 @@ pub async fn handle_get_tokeninfo(
 #[derive(Serialize)]
 pub struct TokenInfoResponse {
     pub status: ApiStatus,
-    pub token_file: String,
-    pub token_list_file: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tokens: Option<String>,
+    pub tokens: Option<Vec<TokenInfo>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tokens_count: Option<usize>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub token_list: Option<String>,
+    pub num: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
 }
 
 pub async fn handle_update_tokeninfo_post(
-    #[cfg(not(feature = "sqlite"))] State(state): State<Arc<Mutex<AppState>>>,
     headers: HeaderMap,
     Json(request): Json<TokenUpdateRequest>,
 ) -> Result<Json<TokenInfoResponse>, StatusCode> {
-    // 验证 AUTH_TOKEN
+    // 验证用户身份
     let auth_header = headers
-        .get(HEADER_NAME_AUTHORIZATION)
+        .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix(AUTHORIZATION_BEARER_PREFIX))
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    if auth_header != AUTH_TOKEN.as_str() {
-        return Err(StatusCode::UNAUTHORIZED);
+    // 获取用户信息
+    let user = get_user_by_auth_token(auth_header)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    if !validate_checksum(&request.checksum) {
+        return Err(StatusCode::BAD_REQUEST);
     }
 
-    let token_file = TOKEN_FILE.as_str();
-    let token_list_file = TOKEN_LIST_FILE.as_str();
+    // 检查token是否已存在
+    let existing_token =
+        get_token_by_token(&request.token).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // 写入文件
-    std::fs::write(&token_file, &request.tokens)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let is_update = existing_token.is_some();
 
-    if let Some(token_list) = &request.token_list {
-        std::fs::write(&token_list_file, token_list)
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    }
+    let token_info = match existing_token {
+        Some(mut token) => {
+            // 更新现有token
+            token.checksum = request.checksum;
+            token.alias = request.alias;
+            token.is_public = request.is_public;
 
-    // 重新加载 tokens
-    let token_infos = load_tokens();
-    let token_infos_len = token_infos.len();
-
-    // 更新应用状态
-    #[cfg(not(feature = "sqlite"))]
-    {
-        let mut state = state.lock().await;
-        state.token_infos = token_infos;
-    }
-
-    #[cfg(feature = "sqlite")]
-    {
-        if let Ok(db) = APP_DB.lock() {
-            for token_info in token_infos {
-                let _ = db.update_token_info(&token_info);
-            }
+            // 更新数据库
+            update_token(&token).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            token
         }
-    }
+        None => {
+            let now = Local::now();
+            let alias = if request.alias.is_none() {
+                match extract_user_id(&request.token) {
+                    Some(user_id) => Some(user_id),
+                    None => None,
+                }
+            } else {
+                request.alias
+            };
+            // 创建新token
+            let new_token = TokenInfo {
+                id: 0, // 数据库会自动分配ID
+                create_at: extract_time(&request.token).unwrap_or_else(|| now),
+                token: request.token,
+                checksum: request.checksum,
+                alias,
+                status: TokenStatus::Active,
+                pengding_at: now,
+                user_id: user.id,
+                is_public: request.is_public,
+                usage: None,
+            };
+
+            // 插入数据库
+            let id = insert_token(&new_token).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            // 获取插入后的完整token信息
+            get_token_by_id(id)
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
+        }
+    };
 
     Ok(Json(TokenInfoResponse {
         status: ApiStatus::Success,
-        token_file: token_file.to_string(),
-        token_list_file: token_list_file.to_string(),
         tokens: None,
-        tokens_count: Some(token_infos_len),
-        token_list: None,
-        message: Some("Token files have been updated and reloaded".to_string()),
+        num: None,
+        message: Some(format!(
+            "Token {} has been {}",
+            token_info.token,
+            if is_update {
+                "updated"
+            } else {
+                "created"
+            }
+        )),
     }))
 }
 
 pub async fn handle_tokeninfo_page() -> impl IntoResponse {
     match AppConfig::get_page_content(ROUTE_TOKENINFO_PATH).unwrap_or_default() {
         PageContent::Default => Response::builder()
-            .header(HEADER_NAME_CONTENT_TYPE, CONTENT_TYPE_TEXT_HTML_WITH_UTF8)
+            .header(CONTENT_TYPE, CONTENT_TYPE_TEXT_HTML_WITH_UTF8)
             .body(include_str!("../../../static/tokeninfo.min.html").to_string())
             .unwrap(),
         PageContent::Text(content) => Response::builder()
-            .header(HEADER_NAME_CONTENT_TYPE, CONTENT_TYPE_TEXT_PLAIN_WITH_UTF8)
+            .header(CONTENT_TYPE, CONTENT_TYPE_TEXT_PLAIN_WITH_UTF8)
             .body(content.clone())
             .unwrap(),
         PageContent::Html(content) => Response::builder()
-            .header(HEADER_NAME_CONTENT_TYPE, CONTENT_TYPE_TEXT_HTML_WITH_UTF8)
+            .header(CONTENT_TYPE, CONTENT_TYPE_TEXT_HTML_WITH_UTF8)
             .body(content.clone())
             .unwrap(),
     }

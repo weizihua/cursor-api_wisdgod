@@ -1,7 +1,7 @@
 use super::{
-    constant::{HEADER_NAME_AUTHORIZATION, AUTHORIZATION_BEARER_PREFIX},
+    constant::AUTHORIZATION_BEARER_PREFIX,
     model::{AppConfig, AppState},
-    lazy::AUTH_TOKEN,
+    lazy::ADMIN_AUTH_TOKEN,
 };
 use crate::common::models::{
     config::{ConfigData, ConfigUpdateRequest},
@@ -9,7 +9,7 @@ use crate::common::models::{
 };
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{header::AUTHORIZATION, HeaderMap, StatusCode},
     Json,
 };
 use std::sync::Arc;
@@ -59,7 +59,7 @@ pub async fn handle_config_update(
     Json(request): Json<ConfigUpdateRequest>,
 ) -> Result<Json<NormalResponse<ConfigData>>, (StatusCode, Json<ErrorResponse>)> {
     let auth_header = headers
-        .get(HEADER_NAME_AUTHORIZATION)
+        .get(AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix(AUTHORIZATION_BEARER_PREFIX))
         .ok_or((
@@ -72,7 +72,7 @@ pub async fn handle_config_update(
             }),
         ))?;
 
-    if auth_header != AUTH_TOKEN.as_str() {
+    if auth_header != ADMIN_AUTH_TOKEN.as_str() {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(ErrorResponse {

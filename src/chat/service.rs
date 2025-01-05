@@ -3,11 +3,10 @@ use crate::{
     app::{
         constant::{
             AUTHORIZATION_BEARER_PREFIX, CURSOR_API2_STREAM_CHAT, FINISH_REASON_STOP,
-            HEADER_NAME_CONTENT_TYPE, OBJECT_CHAT_COMPLETION, OBJECT_CHAT_COMPLETION_CHUNK,
-            STATUS_FAILED, STATUS_SUCCESS,
+            OBJECT_CHAT_COMPLETION, OBJECT_CHAT_COMPLETION_CHUNK,
         },
-        model::{AppConfig, AppState, ChatRequest, RequestLog, TokenInfo},
-        lazy::AUTH_TOKEN,
+        db,
+        model::{AppConfig, AppState, ChatRequest, LogInfo, LogStatus, TokenStatus},
     },
     chat::{
         error::StreamError,
@@ -25,19 +24,21 @@ use crate::{
 use axum::{
     body::Body,
     extract::State,
-    http::{HeaderMap, StatusCode},
+    http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
     response::Response,
     Json,
 };
 use bytes::Bytes;
+use chrono::Local;
 use futures::{Stream, StreamExt};
+use rand::seq::IteratorRandom as _;
 use std::{
     convert::Infallible,
     sync::{atomic::AtomicBool, Arc},
 };
 use std::{
     pin::Pin,
-    sync::atomic::{AtomicUsize, Ordering},
+    sync::atomic::Ordering,
 };
 use tokio::sync::Mutex;
 use uuid::Uuid;
@@ -46,7 +47,7 @@ use uuid::Uuid;
 pub async fn handle_models() -> Json<ModelsResponse> {
     Json(ModelsResponse {
         object: "list",
-        data: &AVAILABLE_MODELS,
+        data: AVAILABLE_MODELS.to_vec(),
     })
 }
 
@@ -56,118 +57,143 @@ pub async fn handle_chat(
     headers: HeaderMap,
     Json(request): Json<ChatRequest>,
 ) -> Result<Response<Body>, (StatusCode, Json<ErrorResponse>)> {
-    let allow_claude = AppConfig::get_allow_claude();
-    // 验证模型是否支持并获取模型信息
-    let model = AVAILABLE_MODELS.iter().find(|m| m.id == request.model);
-    let model_supported = model.is_some();
-
-    if !(model_supported || allow_claude && request.model.starts_with("claude")) {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ChatError::ModelNotSupported(request.model).to_json()),
-        ));
-    }
-
-    let request_time = chrono::Local::now();
-
-    // 验证请求
-    if request.messages.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(ChatError::EmptyMessages.to_json()),
-        ));
-    }
-
-    // 获取并处理认证令牌
-    let auth_token = headers
+    // 从请求头获取token
+    let token = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix(AUTHORIZATION_BEARER_PREFIX))
         .ok_or((
             StatusCode::UNAUTHORIZED,
-            Json(ChatError::Unauthorized.to_json()),
+            Json(ChatError::MissingToken.to_error_response()),
         ))?;
 
-    // 验证 AuthToken
-    if auth_token != AUTH_TOKEN.as_str() {
+    // 验证token并获取用户信息
+    let user = db::get_user_by_auth_token(token).map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ChatError::DatabaseError(err.to_string()).to_error_response()),
+        )
+    })?;
+
+    let user = user.ok_or((
+        StatusCode::UNAUTHORIZED,
+        Json(ChatError::InvalidToken.to_error_response()),
+    ))?;
+
+    // 检查用户是否在封禁期
+    if let Some(ban_expired_at) = user.ban_expired_at {
+        if ban_expired_at > Local::now() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ChatError::UserBanned(ban_expired_at).to_error_response()),
+            ));
+        }
+    }
+
+    let tokens = db::get_available_tokens_by_user_id(Some(user.id)).map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ChatError::DatabaseError(err.to_string()).to_error_response()),
+        )
+    })?;
+
+    if tokens.is_empty() {
         return Err((
-            StatusCode::UNAUTHORIZED,
-            Json(ChatError::Unauthorized.to_json()),
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ChatError::NoTokens.to_error_response()),
         ));
     }
 
-    // 完整的令牌处理逻辑和对应的 checksum
-    let (auth_token, checksum, alias) = {
-        static CURRENT_KEY_INDEX: AtomicUsize = AtomicUsize::new(0);
-        let state_guard = state.lock().await;
-        let token_infos = &state_guard.token_infos;
+    // 随机选择一个可用的token
+    let token_info = tokens.into_iter().choose(&mut rand::thread_rng()).ok_or((
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(ChatError::NoTokens.to_error_response()),
+    ))?;
 
-        if token_infos.is_empty() {
-            return Err((
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(ChatError::NoTokens.to_json()),
-            ));
-        }
+    let allow_claude = AppConfig::get_allow_claude();
+    // 验证模型是否支持并获取模型信息
+    let model = AVAILABLE_MODELS
+        .iter()
+        .find(|m| m.id == request.model)
+        .cloned();
+    let model_supported = model.is_some();
 
-        let index = CURRENT_KEY_INDEX.fetch_add(1, Ordering::SeqCst) % token_infos.len();
-        let token_info = &token_infos[index];
-        (
-            token_info.token.clone(),
-            token_info.checksum.clone(),
-            token_info.alias.clone(),
-        )
+    if !(model_supported || allow_claude && request.model.starts_with("claude")) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ChatError::ModelNotSupported(request.model).to_error_response()),
+        ));
+    }
+
+    let request_time = Local::now();
+
+    // 验证请求
+    if request.messages.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ChatError::EmptyMessages.to_error_response()),
+        ));
+    }
+
+    let log_info = LogInfo {
+        id: 0, // 数据库会自动生成
+        timestamp: request_time,
+        token_info: token_info.clone(),
+        prompt: None,
+        model: request.model.clone(),
+        stream: request.stream,
+        status: LogStatus::Pending,
+        error: None,
     };
+
+    let log_id = db::insert_log(&log_info).map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ChatError::DatabaseError(err.to_string()).to_error_response()),
+        )
+    })?;
 
     // 更新请求日志
     {
-        let state_clone = state.clone();
         let mut state = state.lock().await;
         state.total_requests += 1;
         state.active_requests += 1;
+        let token = token_info.token.clone();
+        let checksum = token_info.checksum.clone();
 
         // 如果有model且需要获取使用情况,创建后台任务获取
         if let Some(model) = model {
             if model.is_usage_check() {
-                let auth_token_clone = auth_token.clone();
-                let checksum_clone = checksum.clone();
-                let state_clone = state_clone.clone();
-
                 tokio::spawn(async move {
-                    let usage = get_user_usage(&auth_token_clone, &checksum_clone).await;
-                    let mut state = state_clone.lock().await;
-                    // 根据时间戳找到对应的日志
-                    if let Some(log) = state
-                        .request_logs
-                        .iter_mut()
-                        .find(|log| log.timestamp == request_time)
-                    {
-                        log.token_info.usage = usage;
+                    let usage = get_user_usage(&token, &checksum).await;
+                    if let Err(err) = db::update_log_usage(log_id, usage) {
+                        eprintln!("Failed to update log usage: {}", err);
                     }
                 });
             }
         }
-
-        let next_id = state.request_logs.last().map_or(1, |log| log.id + 1);
-        state.request_logs.push(RequestLog {
-            id: next_id,
-            timestamp: request_time,
-            model: request.model.clone(),
-            token_info: TokenInfo {
-                token: auth_token.clone(),
-                checksum: checksum.clone(),
-                alias: alias.clone(),
-                usage: None,
-            },
-            prompt: None,
-            stream: request.stream,
-            status: "pending",
-            error: None,
-        });
-
-        if state.request_logs.len() > 100 {
-            state.request_logs.remove(0);
-        }
     }
+
+    if db::get_user_logs_count(user.id).map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ChatError::DatabaseError(err.to_string()).to_error_response()),
+        )
+    })? >= 100 {
+        db::clean_user_logs(user.id, 100).map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ChatError::DatabaseError(err.to_string()).to_error_response()),
+            )
+        })?;
+    }
+
+    db::update_token_status(token_info.id, TokenStatus::Pending).map_err(|err| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ChatError::DatabaseError(err.to_string()).to_error_response()),
+        )
+    })?;
 
     // 将消息转换为hex格式
     let hex_data = super::adapter::encode_chat_message(request.messages, &request.model)
@@ -176,37 +202,39 @@ pub async fn handle_chat(
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(
-                    ChatError::RequestFailed("Failed to encode chat message".to_string()).to_json(),
+                    ChatError::RequestFailed("Failed to encode chat message".to_string())
+                        .to_error_response(),
                 ),
             )
         })?;
 
     // 构建请求客户端
-    let client = build_client(&auth_token, &checksum, CURSOR_API2_STREAM_CHAT);
+    let client = build_client(&token_info.token, &token_info.checksum, CURSOR_API2_STREAM_CHAT);
     let response = client.body(hex_data).send().await;
 
     // 处理请求结果
     let response = match response {
         Ok(resp) => {
             // 更新请求日志为成功
-            {
-                let mut state = state.lock().await;
-                state.request_logs.last_mut().unwrap().status = STATUS_SUCCESS;
-            }
+            db::update_log_status(log_id, LogStatus::Success, None).map_err(|err| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ChatError::DatabaseError(err.to_string()).to_error_response()),
+                )
+            })?;
             resp
         }
         Err(e) => {
             // 更新请求日志为失败
-            {
-                let mut state = state.lock().await;
-                if let Some(last_log) = state.request_logs.last_mut() {
-                    last_log.status = STATUS_FAILED;
-                    last_log.error = Some(e.to_string());
-                }
-            }
+            db::update_log_status(log_id, LogStatus::Failed, Some(e.to_string())).map_err(|err| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ChatError::DatabaseError(err.to_string()).to_error_response()),
+                )
+            })?;
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ChatError::RequestFailed(e.to_string()).to_json()),
+                Json(ChatError::RequestFailed(e.to_string()).to_error_response()),
             ));
         }
     };
@@ -237,7 +265,7 @@ pub async fn handle_chat(
                             // 理论上，若程序正常，必定成功，因为前面判断过了
                             (
                                 StatusCode::INTERNAL_SERVER_ERROR,
-                                Json(ChatError::RequestFailed(error_message).to_json()),
+                                Json(ChatError::RequestFailed(error_message).to_error_response()),
                             )
                         })?;
 
@@ -245,13 +273,12 @@ pub async fn handle_chat(
                             Err(StreamError::ChatError(error)) => {
                                 let error_respone = error.to_error_response();
                                 // 更新请求日志为失败
-                                {
-                                    let mut state = state.lock().await;
-                                    if let Some(last_log) = state.request_logs.last_mut() {
-                                        last_log.status = STATUS_FAILED;
-                                        last_log.error = Some(error_respone.native_code());
-                                    }
-                                }
+                                db::update_log_status(log_id, LogStatus::Failed, Some(error_respone.native_code())).map_err(|err| {
+                                    (
+                                        StatusCode::INTERNAL_SERVER_ERROR,
+                                        Json(ChatError::DatabaseError(err.to_string()).to_error_response()),
+                                    )
+                                })?;
                                 return Err((
                                     error_respone.status_code(),
                                     Json(error_respone.to_common()),
@@ -274,18 +301,17 @@ pub async fn handle_chat(
                         // Box::pin(stream)
                         //     as Pin<Box<dyn Stream<Item = Result<Bytes, reqwest::Error>> + Send>>
                         // 更新请求日志为失败
-                        {
-                            let mut state = state.lock().await;
-                            if let Some(last_log) = state.request_logs.last_mut() {
-                                last_log.status = STATUS_FAILED;
-                                last_log.error = Some("Empty stream response".to_string());
-                            }
-                        }
+                        db::update_log_status(log_id, LogStatus::Failed, Some("Empty stream response".to_string())).map_err(|err| {
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(ChatError::DatabaseError(err.to_string()).to_error_response()),
+                            )
+                        })?;
                         return Err((
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(
                                 ChatError::RequestFailed("Empty stream response".to_string())
-                                    .to_json(),
+                                    .to_error_response(),
                             ),
                         ));
                     }
@@ -304,7 +330,6 @@ pub async fn handle_chat(
                 let model = request.model.clone();
                 let is_start = is_start.clone();
                 let full_text = full_text.clone();
-                let state = state.clone();
 
                 async move {
                     let chunk = chunk.unwrap_or_default();
@@ -415,10 +440,8 @@ pub async fn handle_chat(
                         }
                         Ok(StreamMessage::Debug(debug_prompt)) => {
                             buffer_guard.clear();
-                            if let Ok(mut state) = state.try_lock() {
-                                if let Some(last_log) = state.request_logs.last_mut() {
-                                    last_log.prompt = Some(debug_prompt.clone());
-                                }
+                            if let Err(err) = db::update_log_prompt(log_id, Some(debug_prompt.clone())) {
+                                eprintln!("Failed to update log prompt: {}", err);
                             }
                             Ok(Bytes::new())
                         }
@@ -435,7 +458,7 @@ pub async fn handle_chat(
         Ok(Response::builder()
             .header("Cache-Control", "no-cache")
             .header("Connection", "keep-alive")
-            .header(HEADER_NAME_CONTENT_TYPE, "text/event-stream")
+            .header(CONTENT_TYPE, "text/event-stream")
             .body(Body::from_stream(stream))
             .unwrap())
     } else {
@@ -451,7 +474,7 @@ pub async fn handle_chat(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(
                         ChatError::RequestFailed(format!("Failed to read response chunk: {}", e))
-                            .to_json(),
+                            .to_error_response(),
                     ),
                 )
             })?;
@@ -496,29 +519,34 @@ pub async fn handle_chat(
         // 检查响应是否为空
         if full_text.is_empty() {
             // 更新请求日志为失败
-            {
-                let mut state = state.lock().await;
-                if let Some(last_log) = state.request_logs.last_mut() {
-                    last_log.status = STATUS_FAILED;
-                    last_log.error = Some("Empty response received".to_string());
-                    if let Some(p) = prompt {
-                        last_log.prompt = Some(p);
-                    }
-                }
-            }
+            db::update_log_status(log_id, LogStatus::Failed, Some("Empty response received".to_string())).map_err(|err| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ChatError::DatabaseError(err.to_string()).to_error_response()),
+                )
+            })?;
+            db::update_log_prompt(log_id, None).map_err(|err| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ChatError::DatabaseError(err.to_string()).to_error_response()),
+                )
+            })?;
             return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ChatError::RequestFailed("Empty response received".to_string()).to_json()),
+                Json(
+                    ChatError::RequestFailed("Empty response received".to_string())
+                        .to_error_response(),
+                ),
             ));
         }
 
         // 更新请求日志提示词
-        {
-            let mut state = state.lock().await;
-            if let Some(last_log) = state.request_logs.last_mut() {
-                last_log.prompt = prompt;
-            }
-        }
+        db::update_log_prompt(log_id, prompt).map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ChatError::DatabaseError(err.to_string()).to_error_response()),
+            )
+        })?;
 
         let response_data = ChatResponse {
             id: format!("chatcmpl-{}", Uuid::new_v4().simple()),
@@ -542,7 +570,7 @@ pub async fn handle_chat(
         };
 
         Ok(Response::builder()
-            .header(HEADER_NAME_CONTENT_TYPE, "application/json")
+            .header(CONTENT_TYPE, "application/json")
             .body(Body::from(serde_json::to_string(&response_data).unwrap()))
             .unwrap())
     }

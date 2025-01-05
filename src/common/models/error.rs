@@ -6,10 +6,14 @@ pub enum ChatError {
     NoTokens,
     RequestFailed(String),
     Unauthorized,
+    MissingToken,
+    InvalidToken,
+    UserBanned(chrono::DateTime<chrono::Local>),
+    DatabaseError(String),
 }
 
 impl ChatError {
-    pub fn to_json(&self) -> ErrorResponse {
+    pub fn to_error_response(&self) -> ErrorResponse {
         let (error, message) = match self {
             ChatError::ModelNotSupported(model) => (
                 "model_not_supported",
@@ -22,13 +26,23 @@ impl ChatError {
             ChatError::NoTokens => ("no_tokens", "No available tokens".to_string()),
             ChatError::RequestFailed(err) => ("request_failed", format!("Request failed: {}", err)),
             ChatError::Unauthorized => ("unauthorized", "Invalid authorization token".to_string()),
+            ChatError::MissingToken => ("missing_token", "Missing authorization token".to_string()),
+            ChatError::InvalidToken => ("invalid_token", "Invalid authorization token".to_string()),
+            ChatError::UserBanned(expired_at) => (
+                "user_banned",
+                format!("User is banned until {}", expired_at),
+            ),
+            ChatError::DatabaseError(err) => (
+                "database_error",
+                format!("Database error occurred: {}", err),
+            ),
         };
 
         ErrorResponse {
-          status: super::ApiStatus::Error,
-          code: None,
-          error: Some(error.to_string()),
-          message: Some(message),
+            status: super::ApiStatus::Error,
+            code: None,
+            error: Some(error.to_string()),
+            message: Some(message),
         }
     }
 }

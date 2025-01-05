@@ -6,7 +6,7 @@ pub enum UsageCheck {
     None,
     Default,
     All,
-    Custom(Vec<&'static str>),
+    Custom(Vec<String>),
 }
 
 impl Default for UsageCheck {
@@ -69,14 +69,14 @@ impl<'de> Deserialize<'de> for UsageCheck {
                     return Ok(UsageCheck::None);
                 }
 
-                let models: Vec<&'static str> = list
+                let models: Vec<String> = list
                     .split(',')
                     .filter_map(|model| {
                         let model = model.trim();
                         AVAILABLE_MODELS
                             .iter()
                             .find(|m| m.id == model)
-                            .map(|m| m.id)
+                            .map(|m| m.id.clone())
                     })
                     .collect();
 

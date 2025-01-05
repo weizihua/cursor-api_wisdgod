@@ -80,10 +80,16 @@ pub struct Usage {
 // 模型定义
 #[derive(Serialize, Clone)]
 pub struct Model {
-    pub id: &'static str,
+    pub id: String,
     pub created: &'static i64,
     pub object: &'static str,
     pub owned_by: &'static str,
+}
+
+impl Model {
+    pub fn is_long_context(id :&str) -> bool {
+        id.ends_with("128k") || id.ends_with("500k") || id.ends_with("200k")
+    }
 }
 
 use crate::app::model::{AppConfig, UsageCheck};
@@ -93,9 +99,9 @@ impl Model {
     pub fn is_usage_check(&self) -> bool {
         match AppConfig::get_usage_check() {
             UsageCheck::None => false,
-            UsageCheck::Default => USAGE_CHECK_MODELS.contains(&self.id),
+            UsageCheck::Default => USAGE_CHECK_MODELS.iter().any(|&x| x == self.id.as_str()),
             UsageCheck::All => true,
-            UsageCheck::Custom(models) => models.contains(&self.id),
+            UsageCheck::Custom(models) => models.iter().any(|x| x == &self.id),
         }
     }
 }
@@ -103,5 +109,5 @@ impl Model {
 #[derive(Serialize)]
 pub struct ModelsResponse {
     pub object: &'static str,
-    pub data: &'static [Model],
+    pub data: Vec<Model>,
 }

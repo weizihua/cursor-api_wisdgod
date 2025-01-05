@@ -56,15 +56,8 @@ pub fn validate_checksum(checksum: &str) -> bool {
                 return false;
             }
 
-            // 验证 BASE64 部分
-            let base64_len = 8;
-            let encoded_part = &checksum[..base64_len];
-            if !BASE64.decode(encoded_part).is_ok() {
-                return false;
-            }
-
             // 验证 device_id hash 部分
-            let device_hash = &checksum[base64_len..];
+            let device_hash = &checksum[8..];
             is_valid_hash(device_hash)
         }
         // 包含 MAC hash 的情况

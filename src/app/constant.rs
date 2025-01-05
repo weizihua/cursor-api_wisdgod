@@ -5,12 +5,19 @@ macro_rules! def_pub_const {
 }
 
 def_pub_const!(PKG_VERSION, env!("CARGO_PKG_VERSION"));
-// def_pub_const!(PKG_NAME, env!("CARGO_PKG_NAME"));
+def_pub_const!(PKG_NAME, env!("CARGO_PKG_NAME"));
 // def_pub_const!(PKG_DESCRIPTION, env!("CARGO_PKG_DESCRIPTION"));
 // def_pub_const!(PKG_AUTHORS, env!("CARGO_PKG_AUTHORS"));
 // def_pub_const!(PKG_REPOSITORY, env!("CARGO_PKG_REPOSITORY"));
 
 def_pub_const!(EMPTY_STRING, "");
+
+// v1
+def_pub_const!(ROUTE_MODELS_PATH, "/models");
+def_pub_const!(ROUTE_CHAT_PATH, "/chat/completions");
+
+// api
+def_pub_const!(ROUTE_API_PATH, "/api");
 
 def_pub_const!(ROUTE_ROOT_PATH, "/");
 def_pub_const!(ROUTE_HEALTH_PATH, "/health");
@@ -28,15 +35,15 @@ def_pub_const!(ROUTE_SHARED_JS_PATH, "/static/shared.js");
 def_pub_const!(ROUTE_ABOUT_PATH, "/about");
 def_pub_const!(ROUTE_README_PATH, "/readme");
 
-def_pub_const!(DEFAULT_TOKEN_FILE_NAME, ".token");
-def_pub_const!(DEFAULT_TOKEN_LIST_FILE_NAME, ".token-list");
+// api/auth
+def_pub_const!(ROUTE_AUTH_PATH, "/auth");
+def_pub_const!(ROUTE_AUTH_CALLBACK_PATH, "/callback");
+def_pub_const!(ROUTE_AUTH_INITIATE_PATH, "/initiate");
 
-def_pub_const!(STATUS_SUCCESS, "success");
-def_pub_const!(STATUS_FAILED, "failed");
+def_pub_const!(FALSE, "false");
+def_pub_const!(TRUE, "true");
 
-def_pub_const!(HEADER_NAME_CONTENT_TYPE, "content-type");
-def_pub_const!(HEADER_NAME_AUTHORIZATION, "authorization");
-def_pub_const!(HEADER_NAME_LOCATION, "Location");
+def_pub_const!(HEADER_NAME_GHOST_MODE, "x-ghost-mode");
 
 def_pub_const!(CONTENT_TYPE_PROTO, "application/proto");
 def_pub_const!(CONTENT_TYPE_CONNECT_PROTO, "application/connect+proto");

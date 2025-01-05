@@ -1,262 +1,190 @@
-use crate::app::model::{RequestLog, TokenInfo};
-use crate::common::models::usage::UserUsageInfo;
-use chrono::{DateTime, Local};
-use lazy_static::lazy_static;
-use rusqlite::params;
+mod logs;
+mod tokens;
+mod users;
+
+use chrono::Utc;
 use rusqlite::{Connection, Result};
-use std::path::Path;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+use tokio::time::{self, Duration};
 
-const DB_PATH: &str = "logs/sqlite.db";
-
-pub struct AppDb {
+pub struct Database {
     conn: Connection,
 }
 
-impl AppDb {
-    pub fn new() -> Result<Self> {
-        // 确保目录存在
-        if let Some(parent) = Path::new(DB_PATH).parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                rusqlite::Error::SqliteFailure(
-                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
-                    Some(e.to_string()),
-                )
-            })?;
-        }
+// 全局静态 Database 实例
+static DB: OnceLock<Mutex<Database>> = OnceLock::new();
 
-        let conn = Connection::open(DB_PATH)?;
+// 用于控制清理任务的标志
+static CLEANER_RUNNING: AtomicBool = AtomicBool::new(false);
 
-        // 启用WAL模式以提升性能
-        conn.execute_batch("PRAGMA journal_mode = WAL")?;
+impl Database {
+    pub fn new(path: &str) -> Result<Self> {
+        let conn = Connection::open(path)?;
 
-        // 创建token信息表
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS token_infos (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                token TEXT NOT NULL UNIQUE,
-                checksum TEXT NOT NULL,
-                alias TEXT,
-                fast_requests INTEGER,
-                max_fast_requests INTEGER
-            )",
-            [],
+        // 启用 WAL 模式
+        conn.execute_batch(
+            "
+            PRAGMA journal_mode = WAL;          -- 启用 WAL 模式
+            PRAGMA synchronous = NORMAL;        -- 适度的同步模式
+            PRAGMA cache_size = -64000;         -- 64MB 缓存
+            PRAGMA foreign_keys = ON;           -- 启用外键约束
+            PRAGMA temp_store = MEMORY;         -- 临时表使用内存
+            PRAGMA mmap_size = 30000000000;     -- 30GB mmap
+        ",
         )?;
 
-        // 创建请求日志表
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS request_logs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                timestamp TEXT NOT NULL,
-                model TEXT NOT NULL,
-                token_id INTEGER NOT NULL,
-                prompt TEXT,
-                stream BOOLEAN NOT NULL,
-                status TEXT NOT NULL,
-                error TEXT,
-                FOREIGN KEY(token_id) REFERENCES token_infos(id)
-            )",
-            [],
-        )?;
-
-        // 创建索引
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_token ON token_infos(token)",
-            [],
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_timestamp_model ON request_logs(timestamp, model)",
-            [],
-        )?;
+        // 按照依赖顺序初始化表
+        Self::init_users_table(&conn)?;
+        Self::init_tokens_table(&conn)?;
+        Self::init_logs_table(&conn)?;
 
         Ok(Self { conn })
     }
 
-    fn get_or_create_token_info(&self, token_info: &TokenInfo) -> Result<i64> {
-        let mut stmt = self.conn.prepare_cached(
-            "INSERT OR REPLACE INTO token_infos (token, checksum, alias, fast_requests, max_fast_requests)
-             VALUES (?1, ?2, ?3, ?4, ?5)
-             RETURNING id"
-        )?;
-
-        stmt.query_row(
-            params![
-                &token_info.token,
-                &token_info.checksum,
-                &token_info.alias,
-                token_info.usage.as_ref().map(|u| u.fast_requests),
-                token_info.usage.as_ref().map(|u| u.max_fast_requests),
-            ],
-            |row| row.get(0),
-        )
-    }
-
-    pub fn add_log(&self, log: &RequestLog) -> Result<()> {
-        let token_id = self.get_or_create_token_info(&log.token_info)?;
-
-        self.conn.execute(
-            "INSERT INTO request_logs (timestamp, model, token_id, prompt, stream, status, error) 
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                log.timestamp.to_rfc3339(),
-                &log.model,
-                token_id,
-                &log.prompt,
-                log.stream,
-                &log.status,
-                &log.error,
-            ],
-        )?;
-        Ok(())
-    }
-
-    fn map_row_to_log(&self, row: &rusqlite::Row) -> Result<RequestLog> {
-        let token_id: i64 = row.get(3)?;
-        let token_info = self.get_token_info_by_id(token_id)?;
-
-        Ok(RequestLog {
-            id: row.get(0)?,
-            timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(1)?)
-                .unwrap()
-                .with_timezone(&Local),
-            model: row.get(2)?,
-            token_info,
-            prompt: row.get(4)?,
-            stream: row.get(5)?,
-            status: row.get(6)?,
-            error: row.get(7)?,
+    pub fn init(path: &str) -> Result<()> {
+        let db = Database::new(path)?;
+        DB.set(Mutex::new(db)).map_err(|_| {
+            rusqlite::Error::InvalidParameterName("Database already initialized".into())
         })
     }
 
-    fn get_token_info_by_id(&self, id: i64) -> Result<TokenInfo> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT token, checksum, alias, fast_requests, max_fast_requests 
-             FROM token_infos 
-             WHERE id = ?",
-        )?;
+    pub fn global() -> &'static Mutex<Database> {
+        DB.get().expect("Database not initialized")
+    }
 
-        stmt.query_row([id], |row| {
-            Ok(TokenInfo {
-                token: row.get(0)?,
-                checksum: row.get(1)?,
-                alias: row.get(2)?,
-                usage: Some(UserUsageInfo {
-                    fast_requests: row.get(3)?,
-                    max_fast_requests: row.get(4)?,
-                }),
-            })
+    pub fn conn(&self) -> &Connection {
+        &self.conn
+    }
+
+    pub fn conn_mut(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
+    // 启动定时清理任务
+    pub fn start_cleaner() {
+        // 确保只启动一次
+        if CLEANER_RUNNING.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        tokio::spawn(async move {
+            loop {
+                // 等待到下一个 UTC 20:00
+                let now = Utc::now();
+                let next = (now.date_naive() + chrono::Duration::days(1))
+                    .and_hms_opt(20, 0, 0)
+                    .unwrap();
+                let duration = next.signed_duration_since(now.naive_utc());
+
+                time::sleep(Duration::from_secs(duration.num_seconds() as u64)).await;
+
+                if let Err(e) = Self::clean_expired_tokens().await {
+                    eprintln!("Failed to clean expired tokens: {}", e);
+                }
+            }
+        });
+    }
+
+    // 清理过期数据
+    async fn clean_expired_tokens() -> Result<()> {
+        with_db_mut(|conn| {
+            let tx = conn.transaction()?;
+
+            // 删除过期token相关的日志
+            tx.execute(
+                "DELETE FROM logs WHERE token_id IN (
+                    SELECT id FROM tokens 
+                    WHERE status = 2 OR 
+                          (status = 1 AND duration > 0 AND 
+                           datetime(create_at, '+' || (duration / 86400) || ' days') < datetime('now'))
+                )",
+                [],
+            )?;
+
+            // 删除过期token
+            tx.execute(
+                "DELETE FROM tokens 
+                 WHERE status = 2 OR 
+                       (status = 1 AND duration > 0 AND 
+                        datetime(create_at, '+' || (duration / 86400) || ' days') < datetime('now'))",
+                [],
+            )?;
+
+            // 执行WAL清理
+            tx.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+
+            tx.commit()
         })
     }
 
-    pub fn get_token_infos(&self) -> Result<Vec<TokenInfo>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT token, checksum, alias, fast_requests, max_fast_requests 
-             FROM token_infos",
-        )?;
+    // 停止清理任务
+    // pub fn stop_cleaner() {
+    //     CLEANER_RUNNING.store(false, Ordering::SeqCst);
+    // }
+}
 
-        let tokens = stmt.query_map([], |row| {
-            Ok(TokenInfo {
-                token: row.get(0)?,
-                checksum: row.get(1)?,
-                alias: row.get(2)?,
-                usage: Some(UserUsageInfo {
-                    fast_requests: row.get(3)?,
-                    max_fast_requests: row.get(4)?,
-                }),
-            })
-        })?;
-        tokens.collect()
-    }
+pub fn with_db<F, T>(f: F) -> Result<T>
+where
+    F: FnOnce(&Connection) -> Result<T>,
+{
+    let guard = Database::global().lock().expect("Database lock poisoned");
+    f(guard.conn())
+}
 
-    pub fn get_recent_logs(&self, limit: i64) -> Result<Vec<RequestLog>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT r.id, r.timestamp, r.model, r.token_id, r.prompt, r.stream, r.status, r.error, t.token, t.checksum, t.alias, t.fast_requests, t.max_fast_requests
-             FROM request_logs r
-             JOIN token_infos t ON r.token_id = t.id
-             ORDER BY r.timestamp DESC 
-             LIMIT ?",
-        )?;
+pub fn with_db_mut<F, T>(f: F) -> Result<T>
+where
+    F: FnOnce(&mut Connection) -> Result<T>,
+{
+    let mut guard = Database::global().lock().expect("Database lock poisoned");
+    f(guard.conn_mut())
+}
 
-        let logs = stmt.query_map([limit], |row| {
-            Ok(RequestLog {
-                id: row.get(0)?,
-                timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(1)?)
-                    .unwrap()
-                    .with_timezone(&Local),
-                model: row.get(2)?,
-                token_info: TokenInfo {
-                    token: row.get(8)?,
-                    checksum: row.get(9)?,
-                    alias: row.get(10)?,
-                    usage: Some(UserUsageInfo {
-                        fast_requests: row.get(11)?,
-                        max_fast_requests: row.get(12)?,
-                    }),
-                },
-                prompt: row.get(4)?,
-                stream: row.get(5)?,
-                status: row.get(6)?,
-                error: row.get(7)?,
-            })
-        })?;
-        logs.collect()
-    }
+// 重新导出子模块
+pub use self::logs::*;
+pub use self::tokens::*;
+pub use self::users::*;
 
-    pub fn get_logs_by_timerange(
-        &self,
-        start: DateTime<Local>,
-        end: DateTime<Local>,
-    ) -> Result<Vec<RequestLog>> {
-        let mut stmt = self.conn.prepare_cached(
-            "SELECT r.id, r.timestamp, r.model, r.token_id, r.prompt, r.stream, r.status, r.error, t.token, t.checksum, t.alias, t.fast_requests, t.max_fast_requests
-             FROM request_logs r
-             JOIN token_infos t ON r.token_id = t.id
-             WHERE r.timestamp BETWEEN ?1 AND ?2 
-             ORDER BY r.timestamp DESC",
-        )?;
+/*
+// 以下是可选的扩展功能,暂时注释掉
 
-        let logs = stmt.query_map([start.to_rfc3339(), end.to_rfc3339()], |row| {
-            Ok(RequestLog {
-                id: row.get(0)?,
-                timestamp: DateTime::parse_from_rfc3339(&row.get::<_, String>(1)?)
-                    .unwrap()
-                    .with_timezone(&Local),
-                model: row.get(2)?,
-                token_info: TokenInfo {
-                    token: row.get(8)?,
-                    checksum: row.get(9)?,
-                    alias: row.get(10)?,
-                    usage: Some(UserUsageInfo {
-                        fast_requests: row.get(11)?,
-                        max_fast_requests: row.get(12)?,
-                    }),
-                },
-                prompt: row.get(4)?,
-                stream: row.get(5)?,
-                status: row.get(6)?,
-                error: row.get(7)?,
-            })
-        })?;
-        logs.collect()
-    }
-
-    pub fn update_token_info(&self, token_info: &TokenInfo) -> Result<()> {
-        self.conn.execute(
-          "INSERT OR REPLACE INTO token_infos (token, checksum, alias, fast_requests, max_fast_requests)
-           VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                &token_info.token,
-                &token_info.checksum,
-                &token_info.alias,
-                token_info.usage.as_ref().map(|u| u.fast_requests),
-                token_info.usage.as_ref().map(|u| u.max_fast_requests),
-            ],
-        )?;
-        Ok(())
+impl Drop for Database {
+    fn drop(&mut self) {
+        // 这里可以添加清理代码
+        // Connection 会自动关闭，但如果有其他清理工作可以在这里进行
     }
 }
 
-lazy_static! {
-    pub static ref APP_DB: Mutex<AppDb> =
-        Mutex::new(AppDb::new().expect("Failed to initialize database"));
+use std::sync::LazyLock;
+
+static DB_CONFIG: LazyLock<DbConfig> = LazyLock::new(|| {
+    DbConfig {
+        max_connections: 10,
+        timeout: std::time::Duration::from_secs(30),
+    }
+});
+
+struct DbConfig {
+    max_connections: u32,
+    timeout: std::time::Duration,
+}
+
+pub fn example_usage() -> Result<()> {
+    Database::init("path/to/db.sqlite")?;
+    println!("Max connections: {}", DB_CONFIG.max_connections);
+    with_db(|conn| {
+        Ok(())
+    })?;
+    with_db_mut(|conn| {
+        let tx = conn.transaction()?;
+        tx.commit()
+    })
+}
+*/
+
+// 在应用启动时初始化
+pub async fn init_database(path: &str) -> Result<()> {
+    Database::init(path)?;
+    Database::start_cleaner();
+    Ok(())
 }

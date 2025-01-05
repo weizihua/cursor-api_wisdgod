@@ -1,5 +1,5 @@
 use crate::{
-    app::constant::{DEFAULT_TOKEN_FILE_NAME, DEFAULT_TOKEN_LIST_FILE_NAME, EMPTY_STRING},
+    app::constant::EMPTY_STRING,
     common::utils::parse_string_from_env,
 };
 use std::sync::LazyLock;
@@ -27,18 +27,8 @@ macro_rules! def_pub_static {
 //     };
 // }
 
-def_pub_static!(ROUTE_PREFIX, env: "ROUTE_PREFIX", default: EMPTY_STRING);
-def_pub_static!(AUTH_TOKEN, env: "AUTH_TOKEN", default: EMPTY_STRING);
-def_pub_static!(TOKEN_FILE, env: "TOKEN_FILE", default: DEFAULT_TOKEN_FILE_NAME);
-def_pub_static!(TOKEN_LIST_FILE, env: "TOKEN_LIST_FILE", default: DEFAULT_TOKEN_LIST_FILE_NAME);
-def_pub_static!(
-    ROUTE_MODELS_PATH,
-    format!("{}/v1/models", *ROUTE_PREFIX)
-);
-def_pub_static!(
-    ROUTE_CHAT_PATH,
-    format!("{}/v1/chat/completions", *ROUTE_PREFIX)
-);
+def_pub_static!(ROUTE_PREFIX, env: "ROUTE_PREFIX", default: "/v1");
+def_pub_static!(PUBLIC_AUTH_TOKEN, env: "PUBLIC_AUTH_TOKEN", default: EMPTY_STRING);
 
 pub static START_TIME: LazyLock<chrono::DateTime<chrono::Local>> =
     LazyLock::new(chrono::Local::now);
@@ -55,6 +45,18 @@ pub static CURSOR_API2_BASE_URL: LazyLock<String> = LazyLock::new(|| {
     format!("https://{}/aiserver.v1.AiService/", *CURSOR_API2_HOST)
 });
 
+pub static OAUTH_CLIENT_ID: LazyLock<String> = LazyLock::new(|| {
+    parse_string_from_env("OAUTH_CLIENT_ID", EMPTY_STRING).trim().to_string()
+});
+
+pub static OAUTH_CLIENT_SECRET: LazyLock<String> = LazyLock::new(|| {
+    parse_string_from_env("OAUTH_CLIENT_SECRET", EMPTY_STRING).trim().to_string()
+});
+
+pub static OAUTH_REDIRECT_URI: LazyLock<String> = LazyLock::new(|| {
+    parse_string_from_env("OAUTH_REDIRECT_URI", EMPTY_STRING).trim().to_string()
+});
+
 // pub static DEBUG: LazyLock<bool> = LazyLock::new(|| parse_bool_from_env("DEBUG", false));
 
 // #[macro_export]
@@ -65,3 +67,5 @@ pub static CURSOR_API2_BASE_URL: LazyLock<String> = LazyLock::new(|| {
 //         }
 //     };
 // }
+
+def_pub_static!(ADMIN_AUTH_TOKEN, env: "ADMIN_AUTH_TOKEN", default: EMPTY_STRING);

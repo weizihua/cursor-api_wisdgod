@@ -14,9 +14,9 @@ use super::{
         conversation_message, image_proto, ConversationMessage, ExplicitContext, GetChatRequest,
         ImageProto, ModelDetails,
     },
-    constant::{ERR_UNSUPPORTED_GIF, ERR_UNSUPPORTED_IMAGE_FORMAT, LONG_CONTEXT_MODELS},
-    model::{Message, MessageContent, Role},
-};
+    constant::{ERR_UNSUPPORTED_GIF, ERR_UNSUPPORTED_IMAGE_FORMAT},
+    model::{Message, MessageContent, Role, Model},
+}; 
 
 async fn process_chat_inputs(inputs: Vec<Message>) -> (String, Vec<ConversationMessage>) {
     // 收集 system 指令
@@ -380,7 +380,7 @@ pub async fn encode_chat_message(
         workspace_id: None,
         external_links: vec![],
         commit_notes: vec![],
-        long_context_mode: if LONG_CONTEXT_MODELS.contains(&model_name) {
+        long_context_mode: if Model::is_long_context(model_name) {
             Some(true)
         } else {
             None

@@ -13,7 +13,7 @@ serde_json = "1.0.134"
 
 [dependencies]
 anyhow = "1.0.95"
-axum = { version = "0.7.9", features = ["json"] }
+axum = { version = "0.7.9", features = ["http2", "json"] }
 base64 = { version = "0.22.1", default-features = false, features = ["std"] }
 # brotli = { version = "7.0.0", default-features = false, features = ["std"] }
 bytes = "1.9.0"
@@ -24,13 +24,14 @@ futures = { version = "0.3.31", default-features = false, features = ["std"] }
 gif = { version = "0.13.1", default-features = false, features = ["std"] }
 hex = { version = "0.4.3", default-features = false, features = ["std"] }
 image = { version = "0.25.5", default-features = false, features = ["jpeg", "png", "gif", "webp"] }
-lazy_static = "1.5.0"
+oauth2 = { version = "4.4.2", default-features = false, features = ["reqwest", "rustls-tls"] }
 paste = "1.0.15"
 prost = "0.13.4"
 rand = { version = "0.8.5", default-features = false, features = ["std", "std_rng"] }
 regex = { version = "1.11.1", default-features = false, features = ["std", "perf"] }
-reqwest = { version = "0.12.12", default-features = false, features = ["gzip", "json", "stream", "__tls", "charset", "default-tls", "h2", "http2", "macos-system-configuration"] }
-rusqlite = { version = "0.32.1", features = ["bundled"], optional = true }
+reqwest = { version = "0.12.12", default-features = false, features = ["gzip", "json", "stream", "rustls-tls", "__tls", "charset", "default-tls", "h2", "http2", "macos-system-configuration"] }
+ring = { version = "0.17.8", default-features = false, features = ["alloc"] }
+rusqlite = { version = "0.32.1", features = ["bundled", "chrono"] }
 serde = { version = "1.0.217", default-features = false, features = ["std", "derive"] }
 serde_json = "1.0.134"
 sha2 = { version = "0.10.8", default-features = false }
@@ -47,7 +48,3 @@ codegen-units = 1
 panic = 'abort'
 strip = true
 opt-level = 3
-
-[features]
-default = []
-sqlite = ["dep:rusqlite"]

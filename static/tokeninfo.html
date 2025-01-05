@@ -76,6 +76,19 @@
   <div id="message"></div>
 
   <script>
+    function getUrlParam(name) {
+      const urlParams = new URLSearchParams(window.location.search);
+      return urlParams.get(name);
+    }
+
+    document.addEventListener('DOMContentLoaded', function () {
+      const auth = getUrlParam('auth');
+      if (auth) {
+        document.getElementById('authToken').value = auth;
+        getTokenInfo();
+      }
+    });
+
     function showMessage(text, isError = false) {
       showGlobalMessage(text, isError);
     }
