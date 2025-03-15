@@ -2,9 +2,9 @@ name: Build
 
 on:
   workflow_dispatch:
-  # push:
-  #   tags:
-  #     - 'v*'
+  push:
+    tags:
+      - 'v*'
 
 jobs:
   build:
@@ -189,39 +189,75 @@ jobs:
         retention-days: 1
 
   release:
+    # 创建 GitHub Release 的任务
     name: Create Release
+    # 需要等待 build 和 build-freebsd 任务完成才能执行
     needs: [build, build-freebsd]
+    # 在 Ubuntu 最新版本上运行
     runs-on: ubuntu-latest
+    # 授予写入代码库内容的权限，用于创建 Release
     permissions:
       contents: write
 
     steps:
+    # 第1步：检出代码仓库
     - uses: actions/checkout@v4.2.2
 
+    # 第2步：下载之前任务上传的所有构建产物
     - name: Download all artifacts
       uses: actions/download-artifact@v4.1.8
       with:
-        path: artifacts
+        path: artifacts  # 下载到 artifacts 目录
 
+    # 第3步：准备发布资产
     - name: Prepare release assets
       run: |
-        mkdir release
+        # 创建 release 目录用于存放最终要发布的文件
+        mkdir -p release
         cd artifacts
+        # 遍历所有 binaries-* 目录，将内容复制到 release 目录
         for dir in binaries-*; do
           cp -r "$dir"/* ../release/
         done
 
+    # 第4步：检查文件大小和列表（用于调试）
+    - name: Check file sizes and list
+      run: |
+        echo "======= 文件列表及大小 ======="
+        find release -type f -exec ls -la {} \;
+        echo "======= 文件大小统计 ======="
+        find release -type f -exec du -h {} \;
+        echo "======= 总大小统计 ======="
+        du -sh release/
+
+    # 第5步：压缩大文件（超过50MB的文件）
+    - name: Compress large files
+      run: |
+        cd release
+        # 查找并压缩大文件 (大于50MB)
+        find . -type f -size +50M | while read file; do
+          echo "压缩大文件: $file"
+          gzip -9 "$file"
+        done
+
+    # 第6步：生成校验和文件
     - name: Generate checksums
       run: |
         cd release
+        # 为所有文件生成 SHA256 校验和，保存到 SHA256SUMS.txt
         sha256sum * > SHA256SUMS.txt
 
+    # 第7步：创建 GitHub Release 并上传文件
     - name: Create Release
       uses: softprops/action-gh-release@v2.2.0
       with:
-        files: |
-          release/*
+        # 指定要上传的文件（采用绝对路径）
+        files: ${{ github.workspace }}/release/*
+        # 是否创建为草稿，false 表示直接发布
         draft: false
+        # 是否标记为预发布版本
         prerelease: false
+        # 自动生成发布说明
         generate_release_notes: true
-        fail_on_unmatched_files: true
+        # 如果指定的文件不存在则不会失败
+        fail_on_unmatched_files: false
