@@ -87,31 +87,98 @@ jobs:
     - name: Install Windows dependencies
       if: runner.os == 'Windows'
       run: |
+        # 安装依赖
         choco install -y protoc
         choco install -y openssl
         choco install -y nodejs-lts
 
         # 刷新环境变量
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+        
+        # 显示安装的工具版本（用于调试）
+        Write-Host "Node.js 版本:"
+        node --version
+        Write-Host "NPM 版本:"
+        npm --version
+        Write-Host "Protoc 版本:"
+        protoc --version
+        
+        # 确保 protoc 在 PATH 中
+        $protoc_path = (Get-Command protoc -ErrorAction SilentlyContinue).Path
+        if ($protoc_path) {
+          Write-Host "找到 protoc: $protoc_path"
+          # 显式设置 PROTOC 环境变量
+          echo "PROTOC=$protoc_path" >> $env:GITHUB_ENV
+        } else {
+          Write-Host "警告: 找不到 protoc，尝试查找安装位置"
+          $possible_paths = @(
+            "C:\ProgramData\chocolatey\bin\protoc.exe",
+            "C:\Program Files\protoc\bin\protoc.exe"
+          )
+          foreach ($path in $possible_paths) {
+            if (Test-Path $path) {
+              Write-Host "找到 protoc 在: $path"
+              echo "PROTOC=$path" >> $env:GITHUB_ENV
+              # 添加到当前会话的 PATH
+              $env:Path += ";$(Split-Path $path)"
+              break
+            }
+          }
+        }
+
+        # 安装 Node.js 依赖
+        Write-Host "安装 Node.js 依赖..."
+        cd scripts
+        npm install
+        cd ..
 
         # 设置 OpenSSL 环境变量
         echo "OPENSSL_DIR=C:\Program Files\OpenSSL" >> $env:GITHUB_ENV
         echo "PKG_CONFIG_PATH=C:\Program Files\OpenSSL\lib\pkgconfig" >> $env:GITHUB_ENV
+        
+        # 设置 RUSTFLAGS 以避免某些 Windows 特定问题
+        echo "RUSTFLAGS=-C target-feature=+crt-static" >> $env:GITHUB_ENV
 
     - name: Build macOS (Dynamic)
-      if: runner.os == 'macOS' || runner.os == 'Windows'
+      if: runner.os == 'macOS'
       run: bash scripts/build.sh
 
     - name: Build macOS (Static)
-      if: runner.os == 'macOS' || runner.os == 'Windows'
+      if: runner.os == 'macOS'
       run: bash scripts/build.sh --static
-
-    # - name: Verify build artifacts
-    #   run: |
-    #     if [ ! -d "release" ] || [ -z "$(ls -A release)" ]; then
-    #       echo "Error: No build artifacts found in release directory"
-    #       exit 1
-    #     fi
+      
+    - name: Build Windows
+      if: runner.os == 'Windows'
+      run: |
+        # 显示环境变量（用于调试）
+        Write-Host "PATH: $env:Path"
+        Write-Host "PROTOC: $env:PROTOC"
+        
+        # 确保 scripts 目录中的 Node.js 依赖已安装
+        if (-not (Test-Path "scripts\node_modules")) {
+          Write-Host "安装 scripts 目录中的 Node.js 依赖..."
+          cd scripts
+          npm install
+          cd ..
+        }
+        
+        # 使用 PowerShell 构建脚本
+        Write-Host "使用 PowerShell 脚本构建..."
+        if ($env:USE_STATIC -eq "true") {
+          ./scripts/build.ps1 -Static
+        } else {
+          ./scripts/build.ps1
+        }
+        
+        # 如果上面的命令失败，尝试直接使用 cargo 构建
+        if ($LASTEXITCODE -ne 0) {
+          Write-Host "构建脚本失败，尝试直接使用 cargo 构建..."
+          cargo build --release --target ${{ matrix.targets }}
+          
+          # 创建 release 目录并复制构建产物
+          mkdir -p release
+          Copy-Item "target\${{ matrix.targets }}\release\cursor-api.exe" -Destination "release\cursor-api-${{ matrix.targets }}.exe"
+        }
 
     - name: Upload artifacts
       uses: actions/upload-artifact@v4.5.0
@@ -248,6 +315,12 @@ jobs:
           echo "压缩大文件: $file"
           gzip -9 "$file"
         done
+        
+        # 查找并压缩大文件 (大于20MB)
+        find . -type f -size +20M -size -50M | while read file; do
+          echo "压缩中等大小文件: $file"
+          gzip -6 "$file"
+        done
 
     # 第7步：生成校验和文件
     - name: Generate checksums
@@ -255,20 +328,149 @@ jobs:
         cd release
         # 为所有文件生成 SHA256 校验和，保存到 SHA256SUMS.txt
         sha256sum * > SHA256SUMS.txt
+        
+    # 第8步：将文件分组，便于分批上传
+    - name: Organize files for upload
+      run: |
+        cd release
+        
+        # 创建不同的目录用于分组文件
+        mkdir -p group1 group2 group3 group4
+        
+        # 将文件分组（按操作系统和类型）
+        cp SHA256SUMS.txt group1/
+        
+        # 分组 1: Linux 文件
+        find . -maxdepth 1 -name "*linux*" -exec cp {} group1/ \;
+        
+        # 分组 2: Windows 文件
+        find . -maxdepth 1 -name "*windows*" -exec cp {} group2/ \;
+        
+        # 分组 3: macOS 文件
+        find . -maxdepth 1 -name "*darwin*" -exec cp {} group3/ \;
+        
+        # 分组 4: FreeBSD 文件
+        find . -maxdepth 1 -name "*freebsd*" -exec cp {} group4/ \;
+        
+        # 显示分组结果
+        echo "=== 分组 1 (Linux) ==="
+        ls -la group1/
+        
+        echo "=== 分组 2 (Windows) ==="
+        ls -la group2/
+        
+        echo "=== 分组 3 (macOS) ==="
+        ls -la group3/
+        
+        echo "=== 分组 4 (FreeBSD) ==="
+        ls -la group4/
 
-    # 第8步：创建 GitHub Release 并上传文件
+    # 第9步：创建 GitHub Release（不上传文件）
     - name: Create Release
+      id: create_release
       uses: softprops/action-gh-release@v2.2.0
       with:
         # 使用触发工作流的标签（如果是通过标签触发）或从 Cargo.toml 获取的版本号
         tag_name: ${{ github.ref_type == 'tag' && github.ref_name || steps.cargo_version.outputs.version }}
-        # 指定要上传的文件（采用绝对路径）
-        files: ${{ github.workspace }}/release/*
+        # 不上传文件，只创建 Release
         # 是否创建为草稿，false 表示直接发布
         draft: false
         # 是否标记为预发布版本
         prerelease: false
         # 自动生成发布说明
         generate_release_notes: true
-        # 如果指定的文件不存在则不会失败
+        
+    # 第10步：分批上传文件到 Release
+    - name: Upload Linux files
+      uses: softprops/action-gh-release@v2.2.0
+      with:
+        tag_name: ${{ github.ref_type == 'tag' && github.ref_name || steps.cargo_version.outputs.version }}
+        files: ${{ github.workspace }}/release/group1/*
+        draft: false
+        prerelease: false
         fail_on_unmatched_files: false
+        
+    - name: Upload Windows files
+      uses: softprops/action-gh-release@v2.2.0
+      with:
+        tag_name: ${{ github.ref_type == 'tag' && github.ref_name || steps.cargo_version.outputs.version }}
+        files: ${{ github.workspace }}/release/group2/*
+        draft: false
+        prerelease: false
+        fail_on_unmatched_files: false
+        
+    - name: Upload macOS files
+      uses: softprops/action-gh-release@v2.2.0
+      with:
+        tag_name: ${{ github.ref_type == 'tag' && github.ref_name || steps.cargo_version.outputs.version }}
+        files: ${{ github.workspace }}/release/group3/*
+        draft: false
+        prerelease: false
+        fail_on_unmatched_files: false
+        
+    - name: Upload FreeBSD files
+      uses: softprops/action-gh-release@v2.2.0
+      with:
+        tag_name: ${{ github.ref_type == 'tag' && github.ref_name || steps.cargo_version.outputs.version }}
+        files: ${{ github.workspace }}/release/group4/*
+        draft: false
+        prerelease: false
+        fail_on_unmatched_files: false
+        
+    # 备用方法：如果上述方法失败，使用 actions/upload-release-asset
+    - name: Fallback - Get Release Upload URL
+      id: get_release
+      if: failure()
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const tag = context.ref_type === 'tag' ? context.ref_name : 'v${{ steps.cargo_version.outputs.version }}'.replace('v=', '');
+          console.log(`Looking for release with tag: ${tag}`);
+          
+          try {
+            const release = await github.rest.repos.getReleaseByTag({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag: tag
+            });
+            
+            console.log(`Found release: ${release.data.name}, ID: ${release.data.id}`);
+            return release.data.id;
+          } catch (error) {
+            console.log(`Error getting release: ${error}`);
+            
+            // 如果找不到，创建一个新的
+            console.log('Creating new release...');
+            const newRelease = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tag,
+              name: `Release ${tag}`,
+              draft: false,
+              prerelease: false,
+              generate_release_notes: true
+            });
+            
+            console.log(`Created new release: ${newRelease.data.name}, ID: ${newRelease.data.id}`);
+            return newRelease.data.id;
+          }
+          
+    - name: Fallback - Upload Assets
+      if: failure() && steps.get_release.outputs.result != ''
+      run: |
+        echo "使用备用方法上传文件..."
+        RELEASE_ID=${{ steps.get_release.outputs.result }}
+        
+        # 上传每个文件
+        cd release
+        for file in *; do
+          if [ -f "$file" ]; then
+            echo "上传文件: $file"
+            curl \
+              -X POST \
+              -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Content-Type: $(file -b --mime-type "$file")" \
+              --data-binary @"$file" \
+              "https://uploads.github.com/repos/${{ github.repository }}/releases/${RELEASE_ID}/assets?name=$(basename "$file")"
+          fi
+        done
