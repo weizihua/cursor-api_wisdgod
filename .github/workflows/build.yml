@@ -203,13 +203,22 @@ jobs:
     # 第1步：检出代码仓库
     - uses: actions/checkout@v4.2.2
 
-    # 第2步：下载之前任务上传的所有构建产物
+    # 第2步：获取 Cargo.toml 中的版本号（用于手动触发时）
+    - name: Get version from Cargo.toml
+      if: github.ref_type != 'tag'
+      id: cargo_version
+      run: |
+        VERSION=$(grep '^version = ' Cargo.toml | cut -d '"' -f2)
+        echo "version=v${VERSION}" >> $GITHUB_OUTPUT
+        echo "从 Cargo.toml 获取的版本号: v${VERSION}"
+
+    # 第3步：下载之前任务上传的所有构建产物
     - name: Download all artifacts
       uses: actions/download-artifact@v4.1.8
       with:
         path: artifacts  # 下载到 artifacts 目录
 
-    # 第3步：准备发布资产
+    # 第4步：准备发布资产
     - name: Prepare release assets
       run: |
         # 创建 release 目录用于存放最终要发布的文件
@@ -220,7 +229,7 @@ jobs:
           cp -r "$dir"/* ../release/
         done
 
-    # 第4步：检查文件大小和列表（用于调试）
+    # 第5步：检查文件大小和列表（用于调试）
     - name: Check file sizes and list
       run: |
         echo "======= 文件列表及大小 ======="
@@ -230,7 +239,7 @@ jobs:
         echo "======= 总大小统计 ======="
         du -sh release/
 
-    # 第5步：压缩大文件（超过50MB的文件）
+    # 第6步：压缩大文件（超过50MB的文件）
     - name: Compress large files
       run: |
         cd release
@@ -240,17 +249,19 @@ jobs:
           gzip -9 "$file"
         done
 
-    # 第6步：生成校验和文件
+    # 第7步：生成校验和文件
     - name: Generate checksums
       run: |
         cd release
         # 为所有文件生成 SHA256 校验和，保存到 SHA256SUMS.txt
         sha256sum * > SHA256SUMS.txt
 
-    # 第7步：创建 GitHub Release 并上传文件
+    # 第8步：创建 GitHub Release 并上传文件
     - name: Create Release
       uses: softprops/action-gh-release@v2.2.0
       with:
+        # 使用触发工作流的标签（如果是通过标签触发）或从 Cargo.toml 获取的版本号
+        tag_name: ${{ github.ref_type == 'tag' && github.ref_name || steps.cargo_version.outputs.version }}
         # 指定要上传的文件（采用绝对路径）
         files: ${{ github.workspace }}/release/*
         # 是否创建为草稿，false 表示直接发布
